@@ -19,18 +19,18 @@
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: #faf2f0;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ca8a04;
+  background: #cca43b;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #eab308;
+  background: #6e1329;
 }
 
 body {
-  background-color: #050505;
-  color: #f3f4f6;
+  background-color: #faf2f0; /* Very soft, subtle pastel pinkish off-white */
+  color: #1a0b0d; /* Dark crimson-charcoal for readability */
   font-family: var(--font-sans);
 }

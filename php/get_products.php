@@ -11,7 +11,7 @@ require_once 'db_connect.php';
 
 try {
     // 1. Fetch core products
-    $stmt = $pdo->query("SELECT id, name, category, description, image_url as image, badge FROM products");
+    $stmt = $pdo->query("SELECT id, name, category, description, image_url as image, badge, is_available as isAvailable FROM products");
     $products = $stmt->fetchAll();
 
     // 2. Fetch variants (sizes and prices)
@@ -38,7 +38,8 @@ try {
             'category' => $p['category'],
             'description' => $p['description'],
             'image' => $p['image'],
-            'badge' => $p['badge']
+            'badge' => $p['badge'],
+            'isAvailable' => (bool)$p['isAvailable']
         ];
 
         if (isset($variantsByProduct[$productId])) {

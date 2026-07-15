@@ -6,66 +6,347 @@ import { GoogleGenAI, Type } from "@google/genai";
 
 dotenv.config();
 
+let geminiClient: GoogleGenAI | null = null;
+
+function getGeminiClient(): GoogleGenAI {
+  if (!geminiClient) {
+    const key = process.env.GEMINI_API_KEY;
+    if (!key) {
+      throw new Error("GEMINI_API_KEY is not defined.");
+    }
+    geminiClient = new GoogleGenAI({ apiKey: key });
+  }
+  return geminiClient;
+}
+
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-// In-Memory Database for dynamic simulator state
-const mockInventory: Record<string, { stock: number; price: number; name: string }> = {
-  "black-vanilla": { stock: 120, price: 1700, name: "Black Vanilla (Wholesale Oil)" },
-  "pink-chiffon": { stock: 85, price: 1700, name: "Pink Chiffon (Wholesale Oil)" },
-  "ferrari-blue": { stock: 95, price: 1700, name: "Ferrari Blue (Wholesale Oil)" },
-  "pearl": { stock: 60, price: 1700, name: "Pearl (Wholesale Oil)" },
-  "velvet-musk": { stock: 75, price: 1700, name: "Velvet Musk (Wholesale Oil)" },
-  "mayar-30ml": { stock: 200, price: 150, name: "Mayar EDP (30ml)" },
-  "gissah-one-only": { stock: 150, price: 150, name: "Gissah One & Only (30ml)" },
-  "her-confession": { stock: 45, price: 1500, name: "Her Confession by Lattafa" },
-  "lacoste-essential": { stock: 35, price: 1000, name: "Lacoste Essential (Mamba Edition)" },
-  "rollon-3ml": { stock: 500, price: 120, name: "3ml Roll-on Bottles (per dozen)" },
-  "rollon-6ml": { stock: 400, price: 130, name: "6ml Roll-on Bottles (per dozen)" },
-  "fancy-bottle": { stock: 250, price: 75, name: "Fancy Glass Display Bottle" },
-};
+// -----------------------------------------------------------------------------
+// IN-MEMORY DATA STORES (DATABASES)
+// -----------------------------------------------------------------------------
+
+interface DBProduct {
+  id: string;
+  name: string;
+  category: "oil_wholesale" | "retail_spray" | "accessory";
+  description: string;
+  price?: number;
+  image: string;
+  badge?: string;
+  isAvailable: boolean;
+  sizes?: { size: string; price: number }[];
+}
+
+let dbProducts: DBProduct[] = [
+  {
+    id: "oil_wholesale",
+    name: "Grade 1 Oil-Based Perfume Oil (Wholesale)",
+    category: "oil_wholesale",
+    description: "Purely undiluted grade 1 fragrance oil imported directly from France & Germany. High concentration for up to 48-hour longevity. Perfect for personal luxury, custom decants, or perfume resellers.",
+    image: "https://images.unsplash.com/photo-1616949755610-8c9bbc08f138?auto=format&fit=crop&q=80&w=600",
+    badge: "100% Pure Import",
+    isAvailable: true,
+    sizes: [
+      { size: "250ml", price: 1700 },
+      { size: "500ml", price: 3200 },
+      { size: "1 Litre", price: 6000 }
+    ]
+  },
+  {
+    id: "mayar-30ml",
+    name: "Mayar EDP (30ml Spray)",
+    category: "retail_spray",
+    description: "A delightful fruity-floral fragrance showcasing fresh lychee, raspberry, white flowers, and light vanilla notes. Beautiful mini presentation box.",
+    price: 150,
+    image: "https://images.unsplash.com/photo-1541643600914-78b084683601?auto=format&fit=crop&q=80&w=600",
+    badge: "Wholesale Price Retailing",
+    isAvailable: true
+  },
+  {
+    id: "gissah-one-only",
+    name: "Gissah One & Only EDP (30ml Spray)",
+    category: "retail_spray",
+    description: "A premium Arabian luxury spray offering deep oud and rich patchouli blended with sweet amber and vanilla. Extremely high longevity.",
+    price: 150,
+    image: "https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&q=80&w=600",
+    badge: "Bestselling Mini",
+    isAvailable: true
+  },
+  {
+    id: "her-confession",
+    name: "Her Confession by Lattafa (100ml)",
+    category: "retail_spray",
+    description: "A bold statement of femininity. A captivating blend that speaks of elegance, mystery, and confident attraction. Special wholesale campaign.",
+    price: 1500,
+    image: "https://images.unsplash.com/photo-1592945403244-b3fbafd7f539?auto=format&fit=crop&q=80&w=600",
+    badge: "Mega Promo Offer",
+    isAvailable: true
+  },
+  {
+    id: "lacoste-essential",
+    name: "Lacoste Essential (Mamba Edition, 125ml)",
+    category: "retail_spray",
+    description: "Feel fresh and irresistible with the Mamba Edition. A crisp, woody, and aromatic fragrance that keeps you confident all day long.",
+    price: 1000,
+    image: "https://images.unsplash.com/photo-1523293182086-7651a899d37f?auto=format&fit=crop&q=80&w=600",
+    badge: "Mamba Edition",
+    isAvailable: true
+  },
+  {
+    id: "rollon-3ml",
+    name: "3ml Glass Roll-On Bottles (Per Dozen)",
+    category: "accessory",
+    description: "Leak-proof glass roll-on vials with gold caps. Pocket friendly and perfect for distributing custom 3ml oil perfume blends.",
+    price: 120,
+    image: "https://images.unsplash.com/photo-1608571423902-eed4a5ad8108?auto=format&fit=crop&q=80&w=600",
+    badge: "Wholesale Pack",
+    isAvailable: true
+  },
+  {
+    id: "rollon-6ml",
+    name: "6ml Glass Roll-On Bottles (Per Dozen)",
+    category: "accessory",
+    description: "Durable clear glass roll-on vials with elegant metallic caps. The perfect container size for your KES 10,000 Starter Pack oil business.",
+    price: 130,
+    image: "https://images.unsplash.com/photo-1512290923902-8a9f81dc236c?auto=format&fit=crop&q=80&w=600",
+    badge: "Most Popular",
+    isAvailable: true
+  },
+  {
+    id: "fancy-bottle-apple",
+    name: "Apple-Shape Fancy Glass Refillable Bottle (Each)",
+    category: "accessory",
+    description: "Sleek, apple-contoured refillable bottle with high-shine gold spray pump. Highly attractive for dressers and luxury gift sets.",
+    price: 35,
+    image: "https://images.unsplash.com/photo-1588405748373-122b2321bc31?auto=format&fit=crop&q=80&w=600",
+    badge: "Ksh 35 Only",
+    isAvailable: true
+  },
+  {
+    id: "fancy-bottle-crown",
+    name: "Royal Crown Glass Display Bottle (Each)",
+    category: "accessory",
+    description: "Exquisite crown-shaped decorative display bottle. Perfect for premium decants of 15ml-30ml.",
+    price: 75,
+    image: "https://images.unsplash.com/photo-1547887537-6158d64c35b3?auto=format&fit=crop&q=80&w=600",
+    badge: "Premium Glass",
+    isAvailable: true
+  },
+  {
+    id: "fancy-bottle-crystal",
+    name: "Diamond Facet Premium Decanter Bottle (Each)",
+    category: "accessory",
+    description: "Ultra-luxurious, heavy crystal-cut glass decanter bottle with multi-angled facets. Reflects light beautifully.",
+    price: 150,
+    image: "https://images.unsplash.com/photo-1594035910387-fea47794261f?auto=format&fit=crop&q=80&w=600",
+    badge: "Elite Elegance",
+    isAvailable: true
+  }
+];
+
+interface UserAccount {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  passwordHash: string;
+  createdAt: string;
+}
+
+let dbUsers: UserAccount[] = [
+  {
+    id: "u-9912",
+    name: "John Reseller",
+    email: "customer@tigintscents.com",
+    phone: "0712345678",
+    passwordHash: "password123",
+    createdAt: new Date().toISOString()
+  }
+];
+
+const dbAdmins = [
+  {
+    email: "admin@tigintscents.com",
+    password: "ChangeMe2026!"
+  }
+];
 
 const orders: any[] = [];
-
-// Lazy load Gemini Client to prevent crashing if GEMINI_API_KEY is not defined
-let aiClient: GoogleGenAI | null = null;
-
-function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error("GEMINI_API_KEY is not configured in secrets/environment.");
-    }
-    aiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
-  }
-  return aiClient;
-}
 
 // -----------------------------------------------------------------------------
 // API ENDPOINTS
 // -----------------------------------------------------------------------------
 
-// 1. Get current inventory
-app.get("/api/inventory", (req, res) => {
+// A. Products & Inventory Management
+app.get("/api/products", (req, res) => {
   res.json({
     success: true,
-    inventory: mockInventory,
-    timestamp: new Date().toISOString(),
+    products: dbProducts
   });
 });
 
-// 2. Simulate M-PESA STK Push checkout
+app.post("/api/products", (req, res) => {
+  const { name, category, description, price, image, badge, sizes } = req.body;
+
+  if (!name || !category || !description || !image) {
+    return res.status(400).json({
+      success: false,
+      message: "Required parameters missing: name, category, description, image."
+    });
+  }
+
+  const newProduct: DBProduct = {
+    id: "prod_" + Math.floor(1000 + Math.random() * 9000),
+    name,
+    category,
+    description,
+    price: price ? parseFloat(price) : undefined,
+    image,
+    badge: badge || undefined,
+    isAvailable: true,
+    sizes: sizes || undefined
+  };
+
+  dbProducts.push(newProduct);
+
+  res.json({
+    success: true,
+    message: "Product added successfully to inventory!",
+    product: newProduct
+  });
+});
+
+app.post("/api/products/:id/toggle", (req, res) => {
+  const { id } = req.params;
+  const product = dbProducts.find(p => p.id === id);
+
+  if (!product) {
+    return res.status(404).json({
+      success: false,
+      message: "Product not found."
+    });
+  }
+
+  product.isAvailable = !product.isAvailable;
+
+  res.json({
+    success: true,
+    message: `Product is now ${product.isAvailable ? "Available" : "Out of Stock"}.`,
+    product
+  });
+});
+
+// B. User Registration & Login Systems
+app.post("/api/register", (req, res) => {
+  const { name, email, phone, password } = req.body;
+
+  if (!name || !email || !phone || !password) {
+    return res.status(400).json({
+      success: false,
+      message: "Please fill in all registration fields: name, email, phone, password."
+    });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const existingUser = dbUsers.find(u => u.email === normalizedEmail);
+  if (existingUser) {
+    return res.status(400).json({
+      success: false,
+      message: "An account with this email address already exists."
+    });
+  }
+
+  const newUser: UserAccount = {
+    id: "u-" + Math.floor(1000 + Math.random() * 9000),
+    name,
+    email: normalizedEmail,
+    phone,
+    passwordHash: password, // Simple plain-text hashing simulation
+    createdAt: new Date().toISOString()
+  };
+
+  dbUsers.push(newUser);
+
+  res.json({
+    success: true,
+    message: "User account created successfully! You can now log in.",
+    user: {
+      id: newUser.id,
+      name: newUser.name,
+      email: newUser.email,
+      phone: newUser.phone
+    }
+  });
+});
+
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: "Please enter email and password."
+    });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const user = dbUsers.find(u => u.email === normalizedEmail && u.passwordHash === password);
+
+  if (!user) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid email or password. Please try again."
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Logged in successfully!",
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone
+    }
+  });
+});
+
+// C. Admin Login System
+app.post("/api/admin/login", (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({
+      success: false,
+      message: "Please enter email and password."
+    });
+  }
+
+  const normalizedEmail = email.toLowerCase().trim();
+  const admin = dbAdmins.find(a => a.email === normalizedEmail && a.password === password);
+
+  if (!admin) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid admin credentials."
+    });
+  }
+
+  res.json({
+    success: true,
+    message: "Admin authorized successfully!",
+    admin: {
+      email: admin.email
+    }
+  });
+});
+
+// D. Simulated M-PESA STK Push Checkout
 app.post("/api/pay", (req, res) => {
-  const { phone, amount, deliveryMethod, locationDetails, items } = req.body;
+  const { phone, amount, deliveryMethod, locationDetails, items, customerName, customerPhone } = req.body;
 
   if (!phone || !amount || !items || !Array.isArray(items)) {
     return res.status(400).json({
@@ -74,7 +355,6 @@ app.post("/api/pay", (req, res) => {
     });
   }
 
-  // Basic M-PESA validation format (e.g., 2547XXXXXXXX or 07XXXXXXXX)
   const cleanPhone = phone.trim();
   const mpesaRegex = /^(?:254|\+254|0)?(7|1)\d{8}$/;
   if (!mpesaRegex.test(cleanPhone)) {
@@ -83,14 +363,6 @@ app.post("/api/pay", (req, res) => {
       message: "Invalid M-PESA Phone Number format. Use 07xxxxxxxx or 254xxxxxxxxx.",
     });
   }
-
-  // Process inventory deduction
-  items.forEach((item: any) => {
-    const invKey = item.productId;
-    if (mockInventory[invKey]) {
-      mockInventory[invKey].stock = Math.max(0, mockInventory[invKey].stock - item.quantity);
-    }
-  });
 
   // Create a mock order tracking ID
   const checkoutRequestId = `ws_CO_${Math.floor(100000 + Math.random() * 900000)}`;
@@ -107,6 +379,8 @@ app.post("/api/pay", (req, res) => {
     paymentStatus: "paid", // Instantly complete in simulation
     mpesaReceipt: `MP_${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
     createdAt: new Date().toISOString(),
+    customerName: customerName || "Guest Customer",
+    customerPhone: customerPhone || phone
   };
 
   orders.push(newOrder);

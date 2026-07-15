@@ -14,6 +14,7 @@ export interface Product {
   price?: number; // Null for wholesale oil (calculated by size)
   image: string;
   badge?: string;
+  isAvailable?: boolean;
   sizes?: {
     size: string;
     price: number;
