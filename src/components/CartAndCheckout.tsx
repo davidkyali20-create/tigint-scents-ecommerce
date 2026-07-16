@@ -32,10 +32,13 @@ export default function CartAndCheckout({ cart, onRemoveItem, onClearCart, onOrd
   const [locationDetails, setLocationDetails] = useState("");
   const [loading, setLoading] = useState(false);
   
-  // STK Push active overlay simulation
+  // Real / Simulated M-Pesa states
   const [stkActive, setStkActive] = useState(false);
   const [stkCountdown, setStkCountdown] = useState(6);
   const [simulatedOrder, setSimulatedOrder] = useState<any>(null);
+  const [isRealPayment, setIsRealPayment] = useState(false);
+  const [pollingStatus, setPollingStatus] = useState<"idle" | "waiting_for_pin" | "success" | "failed">("idle");
+  const [mpesaErrorMessage, setMpesaErrorMessage] = useState("");
 
   const subtotal = cart.reduce((acc, item) => acc + item.totalPrice, 0);
   const selectedDelivery = DELIVERY_OPTIONS.find((o) => o.id === deliveryMethod) || DELIVERY_OPTIONS[0];
@@ -49,11 +52,37 @@ export default function CartAndCheckout({ cart, onRemoveItem, onClearCart, onOrd
     }
   };
 
+  const handleForceConfirm = async () => {
+    if (!simulatedOrder) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/orders/${simulatedOrder.id}/confirm`, {
+        method: "POST"
+      });
+      const data = await res.json();
+      if (data.success && data.order) {
+        setPollingStatus("success");
+        setTimeout(() => {
+          setStkActive(false);
+          onOrderSuccess(data.order);
+          onClearCart();
+          setPollingStatus("idle");
+          setIsRealPayment(false);
+        }, 1500);
+      }
+    } catch (err) {
+      console.error("Error manual confirming order:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0) return;
     
     setLoading(true);
+    setMpesaErrorMessage("");
     try {
       // Initiate live POST call to our server.ts /api/pay endpoint
       const res = await fetch("/api/pay", {
@@ -64,6 +93,8 @@ export default function CartAndCheckout({ cart, onRemoveItem, onClearCart, onOrd
           amount: total,
           deliveryMethod,
           locationDetails: locationDetails || "Pick up at Shop 102",
+          customerName: customerName || "Guest Customer",
+          customerPhone: customerPhone || mpesaPhone,
           items: cart.map((i) => ({
             productId: i.productId,
             name: i.name,
@@ -79,23 +110,67 @@ export default function CartAndCheckout({ cart, onRemoveItem, onClearCart, onOrd
       const data = await res.json();
       if (data.success && data.order) {
         setSimulatedOrder(data.order);
-        // Start M-PESA STK Push overlay countdown for high-converting UX feel!
         setStkActive(true);
-        setStkCountdown(6);
-        
-        const interval = setInterval(() => {
-          setStkCountdown((prev) => {
-            if (prev <= 1) {
-              clearInterval(interval);
-              // Trigger final success state
-              setStkActive(false);
-              onOrderSuccess(data.order);
-              onClearCart();
-              return 0;
+
+        if (data.isRealDarajaPayment) {
+          setIsRealPayment(true);
+          setPollingStatus("waiting_for_pin");
+          
+          // Poll the order status on the server every 3s
+          const orderId = data.orderId;
+          let pollAttempts = 0;
+          const maxAttempts = 30; // 90 seconds total
+
+          const pollInterval = setInterval(async () => {
+            pollAttempts += 1;
+            try {
+              const pollRes = await fetch(`/api/orders/${orderId}`);
+              const pollData = await pollRes.json();
+              if (pollData.success && pollData.order) {
+                if (pollData.order.paymentStatus === "paid") {
+                  clearInterval(pollInterval);
+                  setPollingStatus("success");
+                  setTimeout(() => {
+                    setStkActive(false);
+                    onOrderSuccess(pollData.order);
+                    onClearCart();
+                    setPollingStatus("idle");
+                    setIsRealPayment(false);
+                  }, 1500);
+                } else if (pollData.order.paymentStatus === "failed") {
+                  clearInterval(pollInterval);
+                  setPollingStatus("failed");
+                  setMpesaErrorMessage(pollData.order.darajaDetail || "Safaricom transaction declined.");
+                }
+              }
+            } catch (err) {
+              console.error("Error polling order status:", err);
             }
-            return prev - 1;
-          });
-        }, 1000);
+
+            if (pollAttempts >= maxAttempts) {
+              clearInterval(pollInterval);
+              // Allow them to click manual confirmation
+              setPollingStatus("waiting_for_pin");
+            }
+          }, 3000);
+        } else {
+          setIsRealPayment(false);
+          setPollingStatus("success");
+          setStkCountdown(6);
+          
+          const interval = setInterval(() => {
+            setStkCountdown((prev) => {
+              if (prev <= 1) {
+                clearInterval(interval);
+                setStkActive(false);
+                onOrderSuccess(data.order);
+                onClearCart();
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
+        }
       } else {
         alert(data.message || "Payment request failed. Please check M-PESA number.");
       }
@@ -128,34 +203,145 @@ export default function CartAndCheckout({ cart, onRemoveItem, onClearCart, onOrd
       {stkActive && (
         <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white border border-[#ecd1cc] rounded-2xl p-6 lg:p-8 max-w-md w-full text-center shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1.5 bg-green-500"></div>
             
-            <div className="w-20 h-20 rounded-full bg-green-50 border border-green-200 flex items-center justify-center mx-auto mb-6">
-              <Smartphone size={36} className="text-green-600 animate-bounce" />
-            </div>
+            {isRealPayment ? (
+              // Real Safaricom Daraja STK Push State Visuals
+              <>
+                <div className="absolute top-0 left-0 w-full h-1.5 bg-[#cca43b]"></div>
+                
+                <div className="w-20 h-20 rounded-full bg-[#fffcf5] border border-[#f5e3e0] flex items-center justify-center mx-auto mb-4">
+                  {pollingStatus === "success" ? (
+                    <span className="text-3xl">🎉</span>
+                  ) : pollingStatus === "failed" ? (
+                    <span className="text-3xl">⚠️</span>
+                  ) : (
+                    <Smartphone size={36} className="text-[#6e1329] animate-bounce" />
+                  )}
+                </div>
 
-            <span className="bg-green-100 text-green-800 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest font-mono border border-green-200">
-              STK Push Triggered
-            </span>
+                <span className="bg-[#fff0ef] text-[#6e1329] text-[10px] font-black px-3 py-1 rounded-full uppercase tracking-widest font-mono border border-[#ecd1cc]">
+                  Real Safaricom Daraja Active
+                </span>
 
-            <h4 className="text-xl font-bold text-[#6e1329] mt-4 font-display">
-              Check Your Phone!
-            </h4>
-            
-            <p className="text-zinc-600 text-xs mt-2 leading-relaxed">
-              We have dispatched an M-PESA STK prompt to <strong className="text-zinc-900 font-mono">+{mpesaPhone}</strong>.
-            </p>
+                {pollingStatus === "waiting_for_pin" && (
+                  <>
+                    <h4 className="text-xl font-bold text-[#6e1329] mt-4 font-display">
+                      Enter M-PESA PIN!
+                    </h4>
+                    <p className="text-zinc-600 text-xs mt-2 leading-relaxed font-sans">
+                      Safaricom Sandbox STK Push has been triggered. Please enter your PIN on handset <strong className="text-zinc-900 font-mono">+{mpesaPhone}</strong> to confirm payment.
+                    </p>
+                  </>
+                )}
 
-            <div className="bg-green-50/50 border border-green-200 rounded-xl p-4 my-5">
-              <p className="text-[10px] text-green-700 uppercase tracking-wider font-mono">Payment Request Amount</p>
-              <p className="text-2xl font-black text-green-700 font-mono mt-0.5">KES {total.toLocaleString()}</p>
-              <p className="text-[10px] text-zinc-500 italic mt-1.5">Enter your M-PESA PIN to complete the sale</p>
-            </div>
+                {pollingStatus === "success" && (
+                  <>
+                    <h4 className="text-xl font-bold text-emerald-800 mt-4 font-display">
+                      Payment Verified!
+                    </h4>
+                    <p className="text-zinc-600 text-xs mt-2 leading-relaxed">
+                      Safaricom Daraja successfully processed the callback. Generating your wholesale order...
+                    </p>
+                  </>
+                )}
 
-            <div className="flex items-center justify-center gap-2 text-xs text-zinc-500">
-              <Loader2 size={14} className="animate-spin text-green-600" />
-              <span>Simulating network response in {stkCountdown}s...</span>
-            </div>
+                {pollingStatus === "failed" && (
+                  <>
+                    <h4 className="text-xl font-bold text-red-800 mt-4 font-display">
+                      Payment Failed
+                    </h4>
+                    <p className="text-zinc-600 text-xs mt-2 leading-relaxed font-medium">
+                      {mpesaErrorMessage}
+                    </p>
+                  </>
+                )}
+
+                <div className="bg-[#fff9f8] border border-[#f5e3e0] rounded-xl p-4 my-5 text-center">
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider font-mono">Daraja Request ID</p>
+                  <p className="text-xs font-mono text-zinc-800 font-bold mt-0.5 truncate max-w-full">
+                    {simulatedOrder?.checkoutRequestId || "Initializing..."}
+                  </p>
+                  <div className="border-t border-[#f5e3e0] my-2 pt-2 flex justify-between items-center">
+                    <span className="text-[10px] text-zinc-500 font-bold uppercase tracking-wider">Total KES</span>
+                    <span className="text-base font-black text-[#6e1329] font-mono">KES {total.toLocaleString()}</span>
+                  </div>
+                </div>
+
+                {pollingStatus === "waiting_for_pin" && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-center gap-2 text-xs text-zinc-500 bg-zinc-50 py-2 rounded-lg border border-zinc-100">
+                      <Loader2 size={14} className="animate-spin text-[#cca43b]" />
+                      <span>Polling Safaricom Callback...</span>
+                    </div>
+
+                    <div className="border-t border-[#f5e3e0] pt-4 mt-2">
+                      <p className="text-[10px] text-zinc-400 mb-2 leading-relaxed">
+                        Are you using a simulated phone or did not receive the PIN prompt? You can force-confirm payment for immediate processing:
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleForceConfirm}
+                        disabled={loading}
+                        className="w-full py-2 bg-[#cca43b] text-zinc-950 font-black text-xs uppercase tracking-widest rounded-lg hover:bg-[#b8912e] transition duration-150 cursor-pointer flex items-center justify-center gap-2"
+                      >
+                        {loading ? (
+                          <Loader2 size={12} className="animate-spin text-zinc-950" />
+                        ) : (
+                          "Simulate Instant Confirm"
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {pollingStatus === "failed" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStkActive(false);
+                      setIsRealPayment(false);
+                      setPollingStatus("idle");
+                    }}
+                    className="w-full py-2.5 bg-zinc-900 text-white font-bold text-xs uppercase tracking-widest rounded-lg hover:bg-zinc-800 transition cursor-pointer"
+                  >
+                    Close & Try Again
+                  </button>
+                )}
+              </>
+            ) : (
+              // Standard client-side Simulated payment flow
+              <>
+                <div className="absolute top-0 left-0 w-full h-1.5 bg-green-500"></div>
+                
+                <div className="w-20 h-20 rounded-full bg-green-50 border border-green-200 flex items-center justify-center mx-auto mb-6">
+                  <Smartphone size={36} className="text-green-600 animate-bounce" />
+                </div>
+
+                <span className="bg-green-100 text-green-800 text-[10px] font-bold px-3 py-1 rounded-full uppercase tracking-widest font-mono border border-green-200">
+                  Simulated STK Push Triggered
+                </span>
+
+                <h4 className="text-xl font-bold text-[#6e1329] mt-4 font-display">
+                  Check Your Phone!
+                </h4>
+                
+                <p className="text-zinc-600 text-xs mt-2 leading-relaxed font-sans">
+                  We have dispatched an M-PESA STK prompt to <strong className="text-zinc-900 font-mono">+{mpesaPhone}</strong>.
+                </p>
+
+                <div className="bg-green-50/50 border border-green-200 rounded-xl p-4 my-5">
+                  <p className="text-[10px] text-green-700 uppercase tracking-wider font-mono">Payment Request Amount</p>
+                  <p className="text-2xl font-black text-green-700 font-mono mt-0.5">KES {total.toLocaleString()}</p>
+                  <p className="text-[10px] text-zinc-500 italic mt-1.5">Enter your M-PESA PIN to complete the sale</p>
+                </div>
+
+                <div className="flex items-center justify-center gap-2 text-xs text-zinc-500">
+                  <Loader2 size={14} className="animate-spin text-green-600" />
+                  <span>Simulating network response in {stkCountdown}s...</span>
+                </div>
+              </>
+            )}
+
           </div>
         </div>
       )}
